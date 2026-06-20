@@ -1,6 +1,11 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import heroImage from './assets/ngo-volunteers-hero.png'
 import './App.css'
+
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'https://foundation-backend-l0fe.onrender.com/api').replace(
+  /\/$/,
+  '',
+)
 
 const blankVolunteer = {
   fullName: '',
@@ -11,66 +16,88 @@ const blankVolunteer = {
   password: '',
 }
 
-const sampleVolunteers = [
-  {
-    id: 1,
-    fullName: 'Aarav Sharma',
-    email: 'aarav.sharma@example.com',
-    phone: '+91 98765 43210',
-    skills: 'Teaching, Event Support',
-    availability: 'Weekends',
-  },
-  {
-    id: 2,
-    fullName: 'Priya Mehta',
-    email: 'priya.mehta@example.com',
-    phone: '+91 91234 56780',
-    skills: 'Fundraising, Social Media',
-    availability: 'Weekday Evenings',
-  },
-  {
-    id: 3,
-    fullName: 'Rohan Verma',
-    email: 'rohan.verma@example.com',
-    phone: '+91 99887 76655',
-    skills: 'Community Outreach',
-    availability: 'Flexible',
-  },
-]
+async function apiRequest(path, { token, ...options } = {}) {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...options.headers,
+    },
+  })
+
+  const data = await response.json().catch(() => ({}))
+
+  if (!response.ok) {
+    throw new Error(data.message || 'Unable to complete the request.')
+  }
+
+  return data
+}
 
 function App() {
   const [currentPage, setCurrentPage] = useState('home')
-  const [volunteers, setVolunteers] = useState(sampleVolunteers)
+  const [volunteers, setVolunteers] = useState([])
+  const [totalVolunteers, setTotalVolunteers] = useState(0)
   const [registrationForm, setRegistrationForm] = useState(blankVolunteer)
   const [loginForm, setLoginForm] = useState({ email: '', password: '' })
   const [searchTerm, setSearchTerm] = useState('')
   const [notice, setNotice] = useState('')
-  const [isLoggedIn, setIsLoggedIn] = useState(false)
+  const [errorMessage, setErrorMessage] = useState('')
+  const [token, setToken] = useState(() => localStorage.getItem('np_token') || '')
+  const [isSubmitting, setIsSubmitting] = useState(false)
+  const [isLoadingVolunteers, setIsLoadingVolunteers] = useState(false)
 
-  const filteredVolunteers = useMemo(() => {
-    const term = searchTerm.trim().toLowerCase()
+  const isLoggedIn = Boolean(token)
 
-    if (!term) {
-      return volunteers
+  useEffect(() => {
+    if (!isLoggedIn || currentPage !== 'admin') {
+      return undefined
     }
 
-    return volunteers.filter((volunteer) =>
-      [
-        volunteer.fullName,
-        volunteer.email,
-        volunteer.phone,
-        volunteer.skills,
-        volunteer.availability,
-      ]
-        .join(' ')
-        .toLowerCase()
-        .includes(term),
-    )
-  }, [searchTerm, volunteers])
+    const controller = new AbortController()
+
+    async function loadVolunteers() {
+      setIsLoadingVolunteers(true)
+      setErrorMessage('')
+
+      try {
+        const query = searchTerm.trim()
+          ? `?search=${encodeURIComponent(searchTerm.trim())}`
+          : ''
+        const data = await apiRequest(`/volunteers${query}`, {
+          token,
+          signal: controller.signal,
+        })
+
+        setVolunteers(data.volunteers || [])
+        setTotalVolunteers(data.totalVolunteers || 0)
+      } catch (error) {
+        if (error.name !== 'AbortError') {
+          setErrorMessage(error.message)
+        }
+      } finally {
+        if (!controller.signal.aborted) {
+          setIsLoadingVolunteers(false)
+        }
+      }
+    }
+
+    loadVolunteers()
+
+    return () => controller.abort()
+  }, [currentPage, isLoggedIn, searchTerm, token])
 
   const navigateTo = (page) => {
+    if (page === 'admin' && !isLoggedIn) {
+      setCurrentPage('login')
+      setNotice('Please login to view the dashboard.')
+      return
+    }
+
     setCurrentPage(page)
     setNotice('')
+    setErrorMessage('')
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
@@ -92,35 +119,90 @@ function App() {
     }))
   }
 
-  const handleRegister = (event) => {
+  const handleRegister = async (event) => {
     event.preventDefault()
-
-    const newVolunteer = {
-      id: Date.now(),
-      fullName: registrationForm.fullName.trim(),
-      email: registrationForm.email.trim(),
-      phone: registrationForm.phone.trim(),
-      skills: registrationForm.skills.trim(),
-      availability: registrationForm.availability,
-    }
-
-    setVolunteers((currentVolunteers) => [newVolunteer, ...currentVolunteers])
-    setRegistrationForm(blankVolunteer)
-    setNotice('Registration successful. Please login to continue.')
-    setCurrentPage('login')
-  }
-
-  const handleLogin = (event) => {
-    event.preventDefault()
-    setIsLoggedIn(true)
+    setIsSubmitting(true)
+    setErrorMessage('')
     setNotice('')
-    setCurrentPage('admin')
+
+    try {
+      await apiRequest('/auth/register', {
+        method: 'POST',
+        body: JSON.stringify({
+          fullName: registrationForm.fullName.trim(),
+          email: registrationForm.email.trim(),
+          phone: registrationForm.phone.trim(),
+          skills: registrationForm.skills.trim(),
+          availability: registrationForm.availability,
+          password: registrationForm.password,
+        }),
+      })
+
+      setRegistrationForm(blankVolunteer)
+      setLoginForm({
+        email: registrationForm.email.trim(),
+        password: '',
+      })
+      setNotice('Registration successful. Please login to continue.')
+      setCurrentPage('login')
+    } catch (error) {
+      setErrorMessage(error.message)
+    } finally {
+      setIsSubmitting(false)
+    }
   }
 
-  const handleDeleteVolunteer = (volunteerId) => {
-    setVolunteers((currentVolunteers) =>
-      currentVolunteers.filter((volunteer) => volunteer.id !== volunteerId),
-    )
+  const handleLogin = async (event) => {
+    event.preventDefault()
+    setIsSubmitting(true)
+    setErrorMessage('')
+    setNotice('')
+
+    try {
+      const data = await apiRequest('/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({
+          email: loginForm.email.trim(),
+          password: loginForm.password,
+        }),
+      })
+
+      localStorage.setItem('np_token', data.token)
+      setToken(data.token)
+      setLoginForm({ email: '', password: '' })
+      setCurrentPage('admin')
+    } catch (error) {
+      setErrorMessage(error.message)
+    } finally {
+      setIsSubmitting(false)
+    }
+  }
+
+  const handleLogout = () => {
+    localStorage.removeItem('np_token')
+    setToken('')
+    setVolunteers([])
+    setTotalVolunteers(0)
+    setSearchTerm('')
+    setCurrentPage('home')
+  }
+
+  const handleDeleteVolunteer = async (volunteerId) => {
+    setErrorMessage('')
+
+    try {
+      await apiRequest(`/volunteers/${volunteerId}`, {
+        method: 'DELETE',
+        token,
+      })
+
+      setVolunteers((currentVolunteers) =>
+        currentVolunteers.filter((volunteer) => volunteer.id !== volunteerId),
+      )
+      setTotalVolunteers((currentTotal) => Math.max(currentTotal - 1, 0))
+    } catch (error) {
+      setErrorMessage(error.message)
+    }
   }
 
   const renderPage = () => {
@@ -128,6 +210,8 @@ function App() {
       return (
         <RegistrationPage
           formValues={registrationForm}
+          errorMessage={errorMessage}
+          isSubmitting={isSubmitting}
           onChange={updateRegistrationForm}
           onSubmit={handleRegister}
           onNavigate={navigateTo}
@@ -140,6 +224,8 @@ function App() {
         <LoginPage
           formValues={loginForm}
           notice={notice}
+          errorMessage={errorMessage}
+          isSubmitting={isSubmitting}
           onChange={updateLoginForm}
           onSubmit={handleLogin}
           onNavigate={navigateTo}
@@ -150,9 +236,11 @@ function App() {
     if (currentPage === 'admin') {
       return (
         <AdminDashboard
-          volunteers={filteredVolunteers}
+          volunteers={volunteers}
           searchTerm={searchTerm}
-          totalVolunteers={volunteers.length}
+          totalVolunteers={totalVolunteers}
+          errorMessage={errorMessage}
+          isLoading={isLoadingVolunteers}
           onSearchChange={setSearchTerm}
           onDelete={handleDeleteVolunteer}
         />
@@ -168,13 +256,14 @@ function App() {
         currentPage={currentPage}
         isLoggedIn={isLoggedIn}
         onNavigate={navigateTo}
+        onLogout={handleLogout}
       />
       <main>{renderPage()}</main>
     </div>
   )
 }
 
-function Navbar({ currentPage, isLoggedIn, onNavigate }) {
+function Navbar({ currentPage, isLoggedIn, onNavigate, onLogout }) {
   return (
     <header className="navbar">
       <button
@@ -203,13 +292,18 @@ function Navbar({ currentPage, isLoggedIn, onNavigate }) {
           Login
         </button>
         {isLoggedIn && (
-          <button
-            className={currentPage === 'admin' ? 'active' : ''}
-            type="button"
-            onClick={() => onNavigate('admin')}
-          >
-            Dashboard
-          </button>
+          <>
+            <button
+              className={currentPage === 'admin' ? 'active' : ''}
+              type="button"
+              onClick={() => onNavigate('admin')}
+            >
+              Dashboard
+            </button>
+            <button type="button" onClick={onLogout}>
+              Logout
+            </button>
+          </>
         )}
       </nav>
     </header>
@@ -260,7 +354,14 @@ function HomePage({ onNavigate }) {
   )
 }
 
-function RegistrationPage({ formValues, onChange, onSubmit, onNavigate }) {
+function RegistrationPage({
+  formValues,
+  errorMessage,
+  isSubmitting,
+  onChange,
+  onSubmit,
+  onNavigate,
+}) {
   return (
     <section className="page-section">
       <div className="section-heading">
@@ -273,6 +374,8 @@ function RegistrationPage({ formValues, onChange, onSubmit, onNavigate }) {
       </div>
 
       <form className="form-card" onSubmit={onSubmit}>
+        {errorMessage && <p className="error-message">{errorMessage}</p>}
+
         <label htmlFor="fullName">Full Name</label>
         <input
           id="fullName"
@@ -343,8 +446,8 @@ function RegistrationPage({ formValues, onChange, onSubmit, onNavigate }) {
           required
         />
 
-        <button className="primary-button full-width" type="submit">
-          Register
+        <button className="primary-button full-width" type="submit" disabled={isSubmitting}>
+          {isSubmitting ? 'Registering...' : 'Register'}
         </button>
       </form>
 
@@ -358,7 +461,15 @@ function RegistrationPage({ formValues, onChange, onSubmit, onNavigate }) {
   )
 }
 
-function LoginPage({ formValues, notice, onChange, onSubmit, onNavigate }) {
+function LoginPage({
+  formValues,
+  notice,
+  errorMessage,
+  isSubmitting,
+  onChange,
+  onSubmit,
+  onNavigate,
+}) {
   return (
     <section className="page-section compact-section">
       <div className="section-heading">
@@ -369,6 +480,7 @@ function LoginPage({ formValues, notice, onChange, onSubmit, onNavigate }) {
 
       <form className="form-card" onSubmit={onSubmit}>
         {notice && <p className="success-message">{notice}</p>}
+        {errorMessage && <p className="error-message">{errorMessage}</p>}
 
         <label htmlFor="loginEmail">Email</label>
         <input
@@ -392,8 +504,8 @@ function LoginPage({ formValues, notice, onChange, onSubmit, onNavigate }) {
           required
         />
 
-        <button className="primary-button full-width" type="submit">
-          Login
+        <button className="primary-button full-width" type="submit" disabled={isSubmitting}>
+          {isSubmitting ? 'Logging in...' : 'Login'}
         </button>
       </form>
 
@@ -411,6 +523,8 @@ function AdminDashboard({
   volunteers,
   searchTerm,
   totalVolunteers,
+  errorMessage,
+  isLoading,
   onSearchChange,
   onDelete,
 }) {
@@ -429,6 +543,8 @@ function AdminDashboard({
       </div>
 
       <div className="search-card">
+        {errorMessage && <p className="error-message">{errorMessage}</p>}
+
         <label htmlFor="search">Search volunteers</label>
         <input
           id="search"
@@ -452,7 +568,13 @@ function AdminDashboard({
             </tr>
           </thead>
           <tbody>
-            {volunteers.length > 0 ? (
+            {isLoading ? (
+              <tr>
+                <td className="empty-state" colSpan="6">
+                  Loading volunteers...
+                </td>
+              </tr>
+            ) : volunteers.length > 0 ? (
               volunteers.map((volunteer) => (
                 <tr key={volunteer.id}>
                   <td data-label="Name">{volunteer.fullName}</td>
